@@ -1,0 +1,45 @@
+# T-Embed (ESP32-S3R8, 16MB flash, 8MB OPI PSRAM)
+
+# Console over native USB-C (no extra UART chip on T-Embed)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# 16 MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Dual-OTA partition table (see partitions.csv at repo root).
+# NOTE: esp-idf-sys's cmake PROJECT_DIR resolves to the synthesized build
+# directory under target/, not to this repo root, so we must use an absolute
+# path here. If you move the repo, update this path (and re-run a full build
+# so esp-idf-sys re-runs cmake).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/Users/felipearce/Desktop/projects/tembedded/partitions.csv"
+
+# Bootloader rollback: if the freshly-installed app never calls
+# esp_ota_mark_app_valid_cancel_rollback(), the bootloader reverts to the
+# previous slot on the next reset. We make that call once boot reaches a
+# known-healthy state in src/ota.rs.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# App version baked into the firmware image's esp_app_desc_t. We read this
+# back at runtime to compare against the manifest. Bump this on every
+# release, and keep it in sync with the version string in src/ota.rs.
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="1.13.0"
+
+# 8MB octal-SPI PSRAM
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Rust + std + esp-idf HTTP client + jpeg-decoder + render loop all share
+# this. 32 KiB is comfortable for JPEG decode without splurging.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# HTTPS: bundle Mozilla CA roots so esp_http_client can verify TLS certs
+# (covers Azure Blob's DigiCert / Microsoft IT roots out of the box).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y

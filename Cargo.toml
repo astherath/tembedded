@@ -1,0 +1,42 @@
+[package]
+name = "tembedded"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[[bin]]
+name = "tembedded"
+harness = false
+
+[profile.release]
+opt-level = "s"
+# Reuse codegen artifacts across release builds — first build is the same,
+# subsequent builds after a small edit drop from ~60 s to ~15-25 s.
+incremental = true
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[features]
+default = ["std", "embassy", "esp-idf-svc/native"]
+std = ["esp-idf-svc/binstart", "esp-idf-svc/std"]
+embassy = ["esp-idf-svc/embassy-sync", "esp-idf-svc/critical-section", "esp-idf-svc/embassy-time-driver"]
+
+[dependencies]
+log = "0.4"
+esp-idf-svc = "0.52"
+esp-idf-hal = "0.46"
+embedded-svc = "0.29"
+mipidsi = "0.10"
+embedded-graphics = "0.8"
+embedded-graphics-framebuf = "0.5"
+u8g2-fonts = "0.7"
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+qrcodegen = "1.8"
+jpeg-decoder = { version = "0.3", default-features = false }
+
+[build-dependencies]
+embuild = "0.33"

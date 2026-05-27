@@ -1,0 +1,15 @@
+/target
+/.embuild
+Cargo.lock
+*.bin
+*.elf
+*.map
+.DS_Store
+.vscode/
+.idea/
+
+# `src/wifi_creds.rs` used to be gitignored back when it held real SSID/PASS
+# values. As of v0.8.0 the file is empty (NVS is the source of truth) so we
+# commit it. If you want to skip the captive-portal step on a brand-new
+# board, edit it locally with your creds, build, flash — those values get
+# migrated into NVS on first boot and the file is unused after that.
