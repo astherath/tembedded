@@ -25,7 +25,7 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # back at runtime to compare against the manifest. Bump this on every
 # release, and keep it in sync with the version string in src/ota.rs.
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="1.16.0"
+CONFIG_APP_PROJECT_VER="1.16.1"
 
 # 8MB octal-SPI PSRAM
 CONFIG_SPIRAM=y
@@ -43,3 +43,13 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # (covers Azure Blob's DigiCert / Microsoft IT roots out of the box).
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# HTTP server (esp-idf httpd) buffer sizes for incoming requests.
+# Default 512 bytes for the header parser is too small for modern phone
+# browsers that send ~700-900 bytes worth of UA + Accept-* + Sec-Fetch-*
+# + Origin + Referer + Content-Type/Length headers on a POST. Symptom is
+# "Header fields are too long" on form submission to the captive portal
+# or the on-device web manager. Bump to 1024 — costs 1 KiB per active
+# connection. URI bumped to match for symmetry.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=1024

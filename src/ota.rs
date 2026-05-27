@@ -25,7 +25,7 @@ use serde::Deserialize;
 /// Bump in lockstep with `CONFIG_APP_PROJECT_VER` in sdkconfig.defaults.
 /// They don't *have* to match — the comparison below is purely string equality
 /// against the manifest — but keeping them in sync avoids confusion.
-pub const CURRENT_VERSION: &str = "1.16.0";
+pub const CURRENT_VERSION: &str = "1.16.1";
 
 /// Base of the public Azure Blob container. Must end with a trailing slash.
 /// Account: `binsbucket` (resource group `claudisplay`).
