@@ -12,21 +12,33 @@ Standing on `esp-idf-svc` 0.52 + `esp-idf-hal` 0.46 + `mipidsi` 0.10 +
 
 ## What it does
 
-Once flashed and on WiFi, the device cycles through three screens via the
-encoder click:
+Once flashed and on WiFi, the device cycles through a user-configurable
+set of screens via a double-click on the encoder:
 
 | Screen | What |
 |---|---|
-| **STATUS** | Periodically GETs an HTTPS endpoint (`/healthz` by default) and pretty-prints the JSON response, color-coded by token type. Scroll with the wheel. |
-| **IMAGE** | Lazy-loads a JPEG from a public HTTPS URL on first entry, renders it centered with an animated hot-pink/cyan border. |
-| **SYSTEM** | Live device info — version, WiFi SSID, IP, MAC, uptime, free heap, OTA host, image URL — plus the gesture cheatsheet. |
+| **HOME** | Dual world clock — Miami (primary, big) and Seattle (secondary), 12h, blinking colons, animated wave at the bottom. |
+| **FORTUNE** | Zoltar-cat oracle. Press the wheel to draw from the seven babes' 1000-entry corpus. |
+| **GAME** | Safe-cracking minigame: rotate to align a cursor inside a green sweet-spot, click to lock. Three tumblers, each narrower. |
+| **SYSTEM** | Device info — version, WiFi, IP, MAC, uptime, free heap, OTA host — and the **manage URL** (`http://<ip>/`). |
+| **STATUS** | Off by default. Periodic GETs of an HTTPS endpoint with pretty-printed, token-colored JSON. |
+| **IMAGE** | Off by default. Lazy-loaded remote JPEG with an animated hot-pink/cyan border. |
 
-Bottom strip is always-on: page dots on the left, OTA / status text on the right.
+Bottom strip is always-on: page dots on the left (one per visible
+screen), OTA / status text on the right.
 
 **Controls:**
-- **Rotate the encoder** → scroll the current screen
-- **Click the encoder** → next screen (cycles)
+- **Rotate the encoder** → scroll the current screen (or steer the game cursor)
+- **Click the encoder** → screen-specific action (start game, consult fortune)
+- **Double-click** → next visible screen
 - **Hold the encoder ~2 s** → "forget WiFi" — wipes NVS, reboots into the captive-portal AP
+
+**Management UI:** the device hosts a small web app at `http://<device-ip>/`
+(also surfaced on the SYSTEM screen as **MANAGE**). Two tabs: **Info**
+mirrors what the SYSTEM screen shows, **Plugins** lets you drag-reorder
+and show/hide screens. Hit **Apply & Reboot** to commit — the config is
+persisted to NVS and the device picks it up on the next boot. See
+[Web management UI](#web-management-ui) below.
 
 **OTA:** every boot, the device polls a manifest in the bucket; if the
 version differs, it streams the new firmware into the inactive OTA slot,
@@ -177,6 +189,55 @@ say "Forgetting WiFi — reconnect on AP" and reboot into setup.
 
 ---
 
+## Web management UI
+
+Once the device is on your WiFi it serves a small SPA at `http://<device-ip>/`.
+The exact URL is also shown on the SYSTEM screen as **MANAGE**.
+
+The page is a single HTML/CSS/JS bundle compiled into the firmware
+(`assets/manage.html`, embedded via `include_str!`), served by Rust on
+ESP32-S3 via the esp-idf-svc HTTP server. No external dependencies — no
+React, no CDN, no auth. Local-network only.
+
+### Tabs
+
+| Tab | Contents |
+|---|---|
+| **Info** | Model, chip, firmware, WiFi SSID, IP, MAC, OTA host, healthz/image URLs, uptime, free heap, OTA status. Auto-refreshes every 3 s. |
+| **Plugins** | All six screens (Home, Fortune, Game, System, Image, Status) with toggles for visibility and drag-handles for reordering. **Apply & Reboot** writes the new config to NVS and restarts the device; the browser auto-reloads when the device comes back. |
+
+### API
+
+The page is just a client of three Rust handlers — they're also usable
+by anything else on the LAN that speaks JSON:
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `GET` | `/` | — | the SPA HTML |
+| `GET` | `/api/info` | — | `{model, chip, version, ssid, ip, mac, uptime_seconds, free_heap_kib, ota_state, ota_progress_percent, ota_target_version, ota_host, healthz, image_url}` |
+| `GET` | `/api/plugins` | — | `{plugins: [{id, name, description, visible}, ...]}` — order = on-device nav order |
+| `POST` | `/api/plugins` | `{plugins: [{id, visible}, ...]}` | `{ok: true}` then reboots after ~1.2 s |
+
+Server-side validation refuses payloads that have unknown ids, duplicate
+ids, or zero visible entries (the last would soft-brick the nav cycle).
+
+### NVS storage
+
+The plugin config is stored in NVS namespace `cfg`, key `plugins`, as a
+compact comma-separated string:
+
+```
+home:1,fortune:1,game:1,system:1,image:0,status:0
+```
+
+A freshly-flashed device has no `cfg` key yet, so it falls back to the
+defaults in `plugins::REGISTRY` (the same set listed in the table above).
+Adding a new plugin to the registry will append it to existing users'
+configs with its `default_visible` value on next boot — they keep their
+ordering, the new entry shows up at the end.
+
+---
+
 ## OTA architecture
 
 ```
@@ -286,17 +347,26 @@ another screen and back to retry.
 ├── scripts/
 │   ├── azure_setup.sh      ← One-time Azure bucket setup (env-var overridable)
 │   └── release.sh          ← Build + publish a new OTA version
+├── assets/
+│   └── manage.html        ← SPA for the on-device manager (embedded via include_str!)
 └── src/
-    ├── main.rs             ← App state, screen routing, render(), event loop
-    ├── ota.rs              ← Manifest fetch, OTA write loop, slot commit/restart
-    ├── wifi.rs             ← NVS creds, STA connect, 3-step captive provisioning
-    ├── wifi_creds.rs       ← Optional compile-time SSID/password (empty by default)
-    └── image.rs            ← Remote JPEG fetch + decode + animated render
+    ├── main.rs            ← App state, screen routing, render(), event loop
+    ├── ota.rs             ← Manifest fetch, OTA write loop, slot commit/restart
+    ├── wifi.rs            ← NVS creds, STA connect, 3-step captive provisioning
+    ├── wifi_creds.rs      ← Optional compile-time SSID/password (empty by default)
+    ├── image.rs           ← Remote JPEG fetch + decode + animated render
+    ├── home.rs            ← Dual-clock Home screen
+    ├── fortune.rs         ← Zoltar-cat oracle + 1000-entry corpus
+    ├── game.rs            ← Safe-cracking minigame
+    ├── plugins.rs         ← Plugin registry + NVS-backed visibility/order config
+    └── webconfig.rs       ← Web manager HTTP server (port 80, JSON API + HTML)
 ```
 
 Modules `wifi.rs` and `image.rs` are intentionally generic enough that you
 can drop them into another firmware project — pass them an HTTPS URL and a
-framebuffer, they handle the rest.
+framebuffer, they handle the rest. `plugins.rs` + `webconfig.rs` are
+similarly self-contained — point at any NVS partition and they'll wire up
+a configurable, user-editable nav cycle for any screen-based UI.
 
 ---
 

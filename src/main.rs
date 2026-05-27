@@ -37,16 +37,18 @@ mod game;
 mod home;
 mod image;
 mod ota;
+mod plugins;
+mod webconfig;
 mod wifi;
 // wifi_creds.rs is still present as a one-time migration source: if NVS is
 // empty on first boot of this firmware, we try to connect with the baked-in
 // creds and then persist them. After that the file is unused.
 mod wifi_creds;
 
-const URL: &str = "https://api.oliecrypto.com/healthz";
+pub const URL: &str = "https://api.oliecrypto.com/healthz";
 /// Default URL for the image screen. Replace with your own blob path —
 /// JPEG, ideally ≤ 320×170 (it'll scale down preserving aspect if bigger).
-const IMAGE_URL: &str = "https://binsbucket.blob.core.windows.net/firmware/image.jpg";
+pub const IMAGE_URL: &str = "https://binsbucket.blob.core.windows.net/firmware/image.jpg";
 
 pub const W: usize = 320;
 pub const H: usize = 170;
@@ -111,49 +113,36 @@ impl FrameBufferBackend for VecFb {
     fn nr_elements(&self) -> usize { self.0.len() }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum Screen {
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Screen {
     Home = 0,
-    /// Soft-disabled: still renderable, but not in the navigation cycle.
     Image = 1,
     Game = 2,
     Fortune = 3,
-    /// Soft-disabled: still renderable, but not in the navigation cycle.
     Status = 4,
     System = 5,
 }
 /// Sized for the Screen enum (highest discriminant + 1). Used to size
-/// `screen_scroll` — some entries belong to soft-disabled screens but the
-/// extra slots are harmless.
+/// `screen_scroll`; entries for currently-hidden screens are harmless.
 const NUM_SCREENS: usize = 6;
 
-/// Screens reachable via the double-click navigation. Home is first, then
-/// Fortune (moved to 2nd), then Game, then System. Image and Status are
-/// excluded from routing but still exist in code.
-const VISIBLE_SCREENS: &[Screen] = &[
-    Screen::Home,
-    Screen::Fortune,
-    Screen::Game,
-    Screen::System,
-];
-
-impl Screen {
-    fn next(self) -> Self {
-        match self {
-            Screen::Home => Screen::Fortune,
-            Screen::Fortune => Screen::Game,
-            Screen::Game => Screen::System,
-            Screen::System => Screen::Home,
-            // Soft-disabled screens: if somehow active, jump back to Home.
-            Screen::Image | Screen::Status => Screen::Home,
-        }
+/// Compute the next screen in the visible-cycle list. If `current` isn't in
+/// the list (e.g. it was just hidden via the web manager and reboot hasn't
+/// happened yet), wrap to the first visible screen. Returns `Home` as a
+/// last-resort fallback if the list is empty — server validation prevents
+/// this in normal operation.
+fn next_screen(current: Screen, visible: &[Screen]) -> Screen {
+    if visible.is_empty() {
+        return Screen::Home;
     }
+    let idx = visible.iter().position(|&v| v == current).unwrap_or(0);
+    visible[(idx + 1) % visible.len()]
 }
 
-/// Position of `s` within VISIBLE_SCREENS — for the bottom-strip page
-/// dots. Soft-disabled screens fall back to dot 0.
-fn visible_index(s: Screen) -> usize {
-    VISIBLE_SCREENS.iter().position(|&v| v == s).unwrap_or(0)
+/// Position of `s` within the current visible list — for the bottom-strip
+/// page dots. Hidden screens fall back to dot 0.
+fn visible_index(s: Screen, visible: &[Screen]) -> usize {
+    visible.iter().position(|&v| v == s).unwrap_or(0)
 }
 
 struct UiState {
@@ -168,6 +157,11 @@ struct UiState {
     /// Scroll offsets, one per screen, indexed by Screen as usize.
     screen_scroll: [usize; NUM_SCREENS],
     current_screen: Screen,
+    /// User-configurable nav cycle — rebuilt at boot from the plugin
+    /// config in NVS. Always non-empty in normal operation; the web
+    /// manager refuses to save an empty list and `plugins::load` falls
+    /// back to defaults on a corrupt entry.
+    visible_screens: Vec<Screen>,
     /// Free-running tick (5 ms increments) for animation phases.
     tick: u32,
     error: Option<String>,
@@ -186,6 +180,9 @@ struct UiState {
 
 impl Default for UiState {
     fn default() -> Self {
+        // Default to the registry-default cycle so render() works before
+        // main() has had a chance to load the real config from NVS.
+        let visible_screens = plugins::visible_screens(&plugins::default_config());
         Self {
             wifi_ssid: String::new(),
             ip: String::new(),
@@ -194,7 +191,8 @@ impl Default for UiState {
             status: None,
             body_lines: Vec::new(),
             screen_scroll: [0; NUM_SCREENS],
-            current_screen: Screen::Home,
+            current_screen: *visible_screens.first().unwrap_or(&Screen::Home),
+            visible_screens,
             tick: 0,
             error: None,
             ota_line: String::new(),
@@ -393,6 +391,12 @@ fn system_rows(s: &UiState) -> Vec<(String, String)> {
 
     let free_heap = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
 
+    let manage_url = if s.ip.is_empty() {
+        "(offline)".into()
+    } else {
+        format!("http://{}/", s.ip)
+    };
+
     vec![
         ("VERSION".into(), format!("v{}", ota::CURRENT_VERSION)),
         ("CHIP".into(), "ESP32-S3 (LX7)".into()),
@@ -401,6 +405,7 @@ fn system_rows(s: &UiState) -> Vec<(String, String)> {
         ("MAC".into(), s.mac.clone()),
         ("UPTIME".into(), uptime),
         ("FREE HEAP".into(), format!("{} KiB", free_heap / 1024)),
+        ("MANAGE".into(), manage_url),
         ("OTA HOST".into(), "binsbucket.blob".into()),
         ("HEALTHZ".into(), "api.oliecrypto.com".into()),
         ("IMAGE URL".into(), "binsbucket/firmware/image.jpg".into()),
@@ -506,12 +511,14 @@ fn draw_bottom_strip(fb: &mut FrameBuf<Rgb565, VecFb>, s: &UiState) {
     .draw(fb)
     .unwrap();
 
-    // Page dots — only one per VISIBLE_SCREEN so soft-disabled screens
-    // don't show up in the navigation hint.
+    // Page dots — one per visible screen so hidden plugins don't show
+    // up in the navigation hint. Visible list is rebuilt at boot from
+    // the plugin config in NVS, so this reflects the user's current
+    // configuration.
     let dot_y = STRIP_TOP + STRIP_H / 2 - 2;
     let dot_x0 = 8;
-    let active = visible_index(s.current_screen);
-    let dot_count = VISIBLE_SCREENS.len();
+    let active = visible_index(s.current_screen, &s.visible_screens);
+    let dot_count = s.visible_screens.len();
     for i in 0..dot_count {
         let color = if i == active { ACCENT } else { rgb(70, 80, 100) };
         let x = dot_x0 + (i as i32) * 8;
@@ -1063,6 +1070,19 @@ fn main() {
     )
     .unwrap();
 
+    // Rebuild the visible-screen nav cycle from the user's saved plugin
+    // config (or defaults if none). Done before the first non-default
+    // render so the bottom strip dots are correct from the start.
+    let plugin_entries = plugins::load(&nvs_part);
+    state.visible_screens = plugins::visible_screens(&plugin_entries);
+    if !state.visible_screens.contains(&state.current_screen) {
+        state.current_screen = *state.visible_screens.first().unwrap_or(&Screen::Home);
+    }
+    log::info!(
+        "plugins: nav cycle = {:?}",
+        state.visible_screens
+    );
+
     let stored = wifi::load_creds(&nvs_part);
     let mut connected_ssid = String::new();
     let mut connected = false;
@@ -1187,6 +1207,28 @@ fn main() {
             m[0], m[1], m[2], m[3], m[4], m[5]
         ),
         Err(_) => "—".into(),
+    };
+
+    // Start the on-device management UI now that we know our addresses.
+    // Held by `_web_server` for the lifetime of main(); dropping the handle
+    // would tear down the server. Failure is non-fatal — the device keeps
+    // working without remote configuration.
+    let _web_server = match webconfig::start(
+        webconfig::DeviceCtx {
+            ssid: state.wifi_ssid.clone(),
+            ip: state.ip.clone(),
+            mac: state.mac.clone(),
+        },
+        nvs_part.clone(),
+    ) {
+        Ok(s) => {
+            log::info!("webconfig: management UI at http://{}/", state.ip);
+            Some(s)
+        }
+        Err(e) => {
+            log::warn!("webconfig: server failed to start: {e}");
+            None
+        }
     };
 
     // Kick off SNTP so the Home screen's clocks get real wall-clock time.
@@ -1401,9 +1443,10 @@ fn main() {
             } else {
                 match pending_press_ms {
                     Some(t) if now_ms.wrapping_sub(t) < DOUBLE_CLICK_WINDOW_MS => {
-                        // DOUBLE-CLICK → cycle to next screen.
+                        // DOUBLE-CLICK → cycle to next visible screen.
                         pending_press_ms = None;
-                        state.current_screen = state.current_screen.next();
+                        state.current_screen =
+                            next_screen(state.current_screen, &state.visible_screens);
                         dirty = true;
                         // Lazy-load image on first arrival at the Image tab.
                         if state.current_screen == Screen::Image {
