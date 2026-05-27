@@ -9,10 +9,7 @@
 //!
 //! The server handle is held by main() for the lifetime of the device.
 
-use embedded_svc::{
-    http::Method,
-    io::{Read as _, Write as _},
-};
+use embedded_svc::{http::Method, io::Write as _};
 use esp_idf_svc::{
     http::server::{Configuration as HttpServerConfig, EspHttpServer},
     nvs::{EspNvsPartition, NvsDefault},

@@ -7,6 +7,7 @@ Cargo.lock
 .DS_Store
 .vscode/
 .idea/
+.claude/
 
 # `src/wifi_creds.rs` used to be gitignored back when it held real SSID/PASS
 # values. As of v0.8.0 the file is empty (NVS is the source of truth) so we

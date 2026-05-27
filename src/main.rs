@@ -121,10 +121,18 @@ pub enum Screen {
     Fortune = 3,
     Status = 4,
     System = 5,
+    /// On-device walkthrough for the web manager: how to reach it, the
+    /// URL, and a scannable QR. New in v1.15.0.
+    Manage = 6,
 }
 /// Sized for the Screen enum (highest discriminant + 1). Used to size
 /// `screen_scroll`; entries for currently-hidden screens are harmless.
-const NUM_SCREENS: usize = 6;
+const NUM_SCREENS: usize = 7;
+
+/// Manage screen scroll step — each encoder detent moves the body this
+/// many pixels. Tuned so a typical full scroll takes about half a wheel
+/// revolution.
+const MANAGE_SCROLL_STEP_PX: i32 = 8;
 
 /// Compute the next screen in the visible-cycle list. If `current` isn't in
 /// the list (e.g. it was just hidden via the web manager and reboot hasn't
@@ -267,6 +275,7 @@ fn render(fb: &mut FrameBuf<Rgb565, VecFb>, s: &UiState) {
         Screen::Fortune => fortune::render(fb, &s.fortune, BODY_TOP, BODY_BOTTOM, s.tick),
         Screen::Status => render_status_body(fb, s),
         Screen::System => render_system_body(fb, s),
+        Screen::Manage => render_manage_body(fb, s),
     }
 
     draw_bottom_strip(fb, s);
@@ -459,6 +468,382 @@ fn render_system_body(fb: &mut FrameBuf<Rgb565, VecFb>, s: &UiState) {
     }
 
     draw_scrollbar(fb, scroll_top, BODY_BOTTOM, start, end, total, cap);
+}
+
+// ----- Manage screen ------------------------------------------------------
+
+/// Total height of the Manage screen content, in pixels — used to compute
+/// the scroll range and the scrollbar thumb. Bumped whenever
+/// `render_manage_body` adds or removes content rows.
+const MANAGE_CONTENT_H: i32 = 280;
+
+fn manage_visible_h() -> i32 {
+    BODY_BOTTOM - (BODY_TOP + TITLE_H + 4)
+}
+
+/// Maximum scroll value (in MANAGE_SCROLL_STEP_PX units) such that the
+/// last pixel of content lines up with the bottom of the body. Clamped to
+/// 0 when the content fits without scrolling.
+fn manage_max_scroll_steps() -> usize {
+    let overflow = (MANAGE_CONTENT_H - manage_visible_h()).max(0);
+    (overflow / MANAGE_SCROLL_STEP_PX) as usize
+        + if overflow % MANAGE_SCROLL_STEP_PX != 0 { 1 } else { 0 }
+}
+
+fn render_manage_body(fb: &mut FrameBuf<Rgb565, VecFb>, s: &UiState) {
+    draw_screen_title(fb, "MANAGE", Some("remote setup"));
+
+    let scroll_units = s.screen_scroll[Screen::Manage as usize];
+    let scroll_px = (scroll_units as i32) * MANAGE_SCROLL_STEP_PX;
+
+    let content_top = BODY_TOP + TITLE_H + 4;
+    let content_bottom = BODY_BOTTOM;
+
+    // Mask drawing to the body region by tracking each block's y and
+    // skipping ones fully above the viewport. Anything that lands across
+    // the mask is partially drawn — set_pixel / Rectangle::draw clip to
+    // the framebuf bounds, so out-of-body writes are dropped harmlessly.
+    let y0 = content_top - scroll_px;
+
+    let waiting = s.ip.is_empty();
+    let url = if waiting {
+        String::new()
+    } else {
+        format!("http://{}/", s.ip)
+    };
+
+    let mut y = y0;
+
+    // ---- Intro ----------------------------------------------------------
+    draw_text_if_visible(
+        fb,
+        "Configure plugins and view info",
+        BODY_LEFT,
+        y,
+        &F_BODY,
+        FG,
+        content_top,
+        content_bottom,
+    );
+    y += BODY_LINE_H;
+    draw_text_if_visible(
+        fb,
+        "from your phone over the network.",
+        BODY_LEFT,
+        y,
+        &F_BODY,
+        FG,
+        content_top,
+        content_bottom,
+    );
+    y += BODY_LINE_H + 6;
+
+    // ---- Step 01 — same WiFi -------------------------------------------
+    draw_step_marker(fb, "01", y, content_top, content_bottom);
+    let step_x: i32 = BODY_LEFT + 32;
+    draw_text_if_visible(
+        fb,
+        "Connect your phone/laptop to",
+        step_x,
+        y,
+        &F_BODY,
+        FG,
+        content_top,
+        content_bottom,
+    );
+    y += BODY_LINE_H;
+    draw_text_if_visible(
+        fb,
+        "the same WiFi network as this",
+        step_x,
+        y,
+        &F_BODY,
+        FG,
+        content_top,
+        content_bottom,
+    );
+    y += BODY_LINE_H;
+    draw_text_if_visible(
+        fb,
+        "device:",
+        step_x,
+        y,
+        &F_BODY,
+        FG,
+        content_top,
+        content_bottom,
+    );
+    y += BODY_LINE_H + 3;
+    // SSID card — accented background, monospace for the name.
+    let ssid_card_x = step_x;
+    let ssid_card_y = y;
+    let ssid_card_w: i32 = W as i32 - ssid_card_x - 12;
+    let ssid_card_h: i32 = 22;
+    if intersects(ssid_card_y, ssid_card_h, content_top, content_bottom) {
+        Rectangle::new(
+            Point::new(ssid_card_x, ssid_card_y),
+            Size::new(ssid_card_w as u32, ssid_card_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(PANEL))
+        .draw(fb)
+        .unwrap();
+        Rectangle::new(
+            Point::new(ssid_card_x, ssid_card_y),
+            Size::new(2, ssid_card_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(ACCENT))
+        .draw(fb)
+        .unwrap();
+        let ssid_text = if s.wifi_ssid.is_empty() {
+            "(none)".to_string()
+        } else {
+            s.wifi_ssid.clone()
+        };
+        let _ = F_HEADER.render(
+            ssid_text.as_str(),
+            Point::new(ssid_card_x + 8, ssid_card_y + 5),
+            VerticalPosition::Top,
+            FontColor::Transparent(FG),
+            fb,
+        );
+    }
+    y += ssid_card_h + 10;
+
+    // ---- Step 02 — URL -------------------------------------------------
+    draw_step_marker(fb, "02", y, content_top, content_bottom);
+    draw_text_if_visible(
+        fb,
+        "Open this URL in any browser:",
+        step_x,
+        y,
+        &F_BODY,
+        FG,
+        content_top,
+        content_bottom,
+    );
+    y += BODY_LINE_H + 3;
+    // URL card
+    let url_card_x = step_x;
+    let url_card_y = y;
+    let url_card_w: i32 = W as i32 - url_card_x - 12;
+    let url_card_h: i32 = 22;
+    if intersects(url_card_y, url_card_h, content_top, content_bottom) {
+        Rectangle::new(
+            Point::new(url_card_x, url_card_y),
+            Size::new(url_card_w as u32, url_card_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(PANEL))
+        .draw(fb)
+        .unwrap();
+        Rectangle::new(
+            Point::new(url_card_x, url_card_y),
+            Size::new(2, url_card_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(if waiting { WARN } else { OK }),
+        )
+        .draw(fb)
+        .unwrap();
+        let url_text = if waiting {
+            "waiting for WiFi…".to_string()
+        } else {
+            url.clone()
+        };
+        let _ = F_HEADER.render(
+            url_text.as_str(),
+            Point::new(url_card_x + 8, url_card_y + 5),
+            VerticalPosition::Top,
+            FontColor::Transparent(FG),
+            fb,
+        );
+    }
+    y += url_card_h + 10;
+
+    // ---- Step 03 — scan QR --------------------------------------------
+    draw_step_marker(fb, "03", y, content_top, content_bottom);
+    draw_text_if_visible(
+        fb,
+        "Or scan the QR code below:",
+        step_x,
+        y,
+        &F_BODY,
+        FG,
+        content_top,
+        content_bottom,
+    );
+    y += BODY_LINE_H + 6;
+
+    // ---- QR code ------------------------------------------------------
+    let qr_size_px: i32 = 96;
+    if waiting {
+        // Placeholder card while WiFi is still coming up.
+        let card_x = (W as i32 - qr_size_px) / 2;
+        if intersects(y, qr_size_px, content_top, content_bottom) {
+            Rectangle::new(
+                Point::new(card_x, y),
+                Size::new(qr_size_px as u32, qr_size_px as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(PANEL))
+            .draw(fb)
+            .unwrap();
+            let _ = F_MICRO.render(
+                "waiting for WiFi…",
+                Point::new(card_x + 14, y + qr_size_px / 2 - 4),
+                VerticalPosition::Top,
+                FontColor::Transparent(MUTED),
+                fb,
+            );
+        }
+    } else if let Some((qr_modules_n, qr_bits)) = make_qr(&url) {
+        if intersects(y, qr_size_px, content_top, content_bottom) {
+            // Center the QR horizontally in the body.
+            let quiet: u32 = 2;
+            let total_modules = qr_modules_n as u32 + quiet * 2;
+            let px_per_module = ((qr_size_px as u32) / total_modules).max(1);
+            let actual = (total_modules * px_per_module) as i32;
+            let origin = Point::new((W as i32 - actual) / 2, y);
+            draw_qr_at(fb, origin, qr_modules_n, &qr_bits, px_per_module);
+        }
+    }
+    y += qr_size_px + 8;
+
+    // ---- Footer note --------------------------------------------------
+    draw_text_if_visible(
+        fb,
+        "Local network only — no login.",
+        BODY_LEFT,
+        y,
+        &F_MICRO,
+        MUTED,
+        content_top,
+        content_bottom,
+    );
+
+    // ---- Mask off any content that bled above the title strip ---------
+    // The title strip lives at BODY_TOP..content_top; scrolled-up content
+    // must not paint there. We clear that band after the body draw so the
+    // title stays clean.
+    Rectangle::new(
+        Point::new(0, BODY_TOP),
+        Size::new(W as u32, (content_top - BODY_TOP) as u32),
+    )
+    .into_styled(PrimitiveStyle::with_fill(BG))
+    .draw(fb)
+    .unwrap();
+    // Re-draw the title since we just wiped it.
+    draw_screen_title(fb, "MANAGE", Some("remote setup"));
+
+    // ---- Scrollbar ----------------------------------------------------
+    let max_steps = manage_max_scroll_steps();
+    if max_steps > 0 {
+        let track_x = W as i32 - 6;
+        let track_top = content_top + 4;
+        let track_bot = content_bottom - 4;
+        let track_h = (track_bot - track_top).max(1) as u32;
+        Rectangle::new(Point::new(track_x, track_top), Size::new(2, track_h))
+            .into_styled(PrimitiveStyle::with_fill(rgb(40, 50, 70)))
+            .draw(fb)
+            .unwrap();
+        let visible_h = manage_visible_h() as f32;
+        let thumb_ratio = (visible_h / MANAGE_CONTENT_H as f32).clamp(0.15, 1.0);
+        let thumb_h = ((track_h as f32) * thumb_ratio).max(8.0) as u32;
+        let progress = (scroll_units as f32 / max_steps as f32).clamp(0.0, 1.0);
+        let thumb_y = track_top + ((track_h - thumb_h) as f32 * progress) as i32;
+        Rectangle::new(Point::new(track_x, thumb_y), Size::new(2, thumb_h))
+            .into_styled(PrimitiveStyle::with_fill(ACCENT))
+            .draw(fb)
+            .unwrap();
+        if scroll_units > 0 {
+            triangle_up(fb, Point::new(W as i32 - 14, content_top), 5, ACCENT);
+        }
+        if scroll_units < max_steps {
+            triangle_down(fb, Point::new(W as i32 - 14, content_bottom - 6), 5, ACCENT);
+        }
+    }
+}
+
+/// Render a single text line iff it overlaps the visible body region.
+/// Saves the cost of rendering glyphs that would clip entirely out.
+fn draw_text_if_visible(
+    fb: &mut FrameBuf<Rgb565, VecFb>,
+    text: &str,
+    x: i32,
+    y: i32,
+    font: &FontRenderer,
+    color: Rgb565,
+    region_top: i32,
+    region_bottom: i32,
+) {
+    // F_BODY / F_MICRO are 8-12 px tall; pad both sides so partial lines
+    // still draw.
+    if y + 14 < region_top || y > region_bottom {
+        return;
+    }
+    let _ = font.render(
+        text,
+        Point::new(x, y),
+        VerticalPosition::Top,
+        FontColor::Transparent(color),
+        fb,
+    );
+}
+
+fn draw_step_marker(
+    fb: &mut FrameBuf<Rgb565, VecFb>,
+    label: &str,
+    y: i32,
+    region_top: i32,
+    region_bottom: i32,
+) {
+    if y + 14 < region_top || y > region_bottom {
+        return;
+    }
+    let _ = F_HEADER.render(
+        label,
+        Point::new(BODY_LEFT, y - 2),
+        VerticalPosition::Top,
+        FontColor::Transparent(ACCENT),
+        fb,
+    );
+}
+
+fn intersects(y: i32, h: i32, region_top: i32, region_bottom: i32) -> bool {
+    y + h >= region_top && y <= region_bottom
+}
+
+fn draw_qr_at(
+    fb: &mut FrameBuf<Rgb565, VecFb>,
+    origin: Point,
+    qr_size: usize,
+    qr_modules: &[bool],
+    px_per_module: u32,
+) {
+    let quiet: u32 = 2;
+    let total_modules = qr_size as u32 + quiet * 2;
+    let total_px = total_modules * px_per_module;
+
+    Rectangle::new(origin, Size::new(total_px, total_px))
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .draw(fb)
+        .unwrap();
+
+    let qr_origin = Point::new(
+        origin.x + (quiet * px_per_module) as i32,
+        origin.y + (quiet * px_per_module) as i32,
+    );
+    for y in 0..qr_size {
+        for x in 0..qr_size {
+            if qr_modules[y * qr_size + x] {
+                let px = Point::new(
+                    qr_origin.x + (x as u32 * px_per_module) as i32,
+                    qr_origin.y + (y as u32 * px_per_module) as i32,
+                );
+                Rectangle::new(px, Size::new(px_per_module, px_per_module))
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+                    .draw(fb)
+                    .unwrap();
+            }
+        }
+    }
 }
 
 // ----- Shared widgets -----------------------------------------------------
@@ -1409,6 +1794,7 @@ fn main() {
                     Screen::Home => 1,
                     Screen::Fortune => 1,
                     Screen::System => system_body_visible_lines(),
+                    Screen::Manage => 1,
                 };
                 let total = match state.current_screen {
                     Screen::Status => state.body_lines.len(),
@@ -1417,6 +1803,7 @@ fn main() {
                     Screen::Home => 0,
                     Screen::Fortune => 0,
                     Screen::System => system_rows(&state).len(),
+                    Screen::Manage => manage_max_scroll_steps() + 1,
                 };
                 let max_scroll = total.saturating_sub(cap);
                 let idx = state.current_screen as usize;

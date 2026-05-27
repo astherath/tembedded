@@ -21,6 +21,7 @@ set of screens via a double-click on the encoder:
 | **FORTUNE** | Zoltar-cat oracle. Press the wheel to draw from the seven babes' 1000-entry corpus. |
 | **GAME** | Safe-cracking minigame: rotate to align a cursor inside a green sweet-spot, click to lock. Three tumblers, each narrower. |
 | **SYSTEM** | Device info — version, WiFi, IP, MAC, uptime, free heap, OTA host — and the **manage URL** (`http://<ip>/`). |
+| **MANAGE** | Scrollable walkthrough for the web manager: same-WiFi instructions, the device's URL, and a QR you can scan with your phone to skip typing the IP. Last screen in the cycle. |
 | **STATUS** | Off by default. Periodic GETs of an HTTPS endpoint with pretty-printed, token-colored JSON. |
 | **IMAGE** | Off by default. Lazy-loaded remote JPEG with an animated hot-pink/cyan border. |
 

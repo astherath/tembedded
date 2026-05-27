@@ -75,6 +75,13 @@ pub const REGISTRY: &[PluginInfo] = &[
         screen: Screen::Status,
         default_visible: false,
     },
+    PluginInfo {
+        id: "manage",
+        name: "Manage",
+        description: "On-device walkthrough for the web manager — same-WiFi instructions, the device's URL, and a scannable QR. Handy when you forget the IP. Default last screen in the nav cycle.",
+        screen: Screen::Manage,
+        default_visible: true,
+    },
 ];
 
 pub fn lookup(id: &str) -> Option<&'static PluginInfo> {

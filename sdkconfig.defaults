@@ -25,7 +25,7 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # back at runtime to compare against the manifest. Bump this on every
 # release, and keep it in sync with the version string in src/ota.rs.
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="1.14.0"
+CONFIG_APP_PROJECT_VER="1.15.0"
 
 # 8MB octal-SPI PSRAM
 CONFIG_SPIRAM=y
