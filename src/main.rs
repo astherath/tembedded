@@ -1,3 +1,7 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::time::Duration;
 
 use embedded_graphics::{
@@ -359,19 +363,40 @@ fn render_status_body(fb: &mut FrameBuf<Rgb565, VecFb>, s: &UiState) {
     let scroll = s.screen_scroll[Screen::Status as usize];
     let start = scroll.min(total.saturating_sub(1));
     let end = (start + cap).min(total);
-    for (i, line) in s.body_lines[start..end].iter().enumerate() {
-        let y = scroll_top + (i as i32) * BODY_LINE_H;
-        let color = line_color(line);
+
+    if total == 0 {
+        // Async fetch hasn't landed yet (or the screen was just opened
+        // for the first time on a brand-new device). Spinner-style
+        // placeholder so it doesn't look frozen.
+        let phase = ((s.tick / 40) % 4) as usize;
+        let dots: &str = match phase {
+            0 => "",
+            1 => ".",
+            2 => "..",
+            _ => "...",
+        };
+        let msg = format!("fetching{dots}");
         let _ = F_BODY.render(
-            line.as_str(),
-            Point::new(BODY_LEFT + 4, y),
+            msg.as_str(),
+            Point::new(BODY_LEFT + 4, scroll_top + BODY_LINE_H),
             VerticalPosition::Top,
-            FontColor::Transparent(color),
+            FontColor::Transparent(MUTED),
             fb,
         );
+    } else {
+        for (i, line) in s.body_lines[start..end].iter().enumerate() {
+            let y = scroll_top + (i as i32) * BODY_LINE_H;
+            let color = line_color(line);
+            let _ = F_BODY.render(
+                line.as_str(),
+                Point::new(BODY_LEFT + 4, y),
+                VerticalPosition::Top,
+                FontColor::Transparent(color),
+                fb,
+            );
+        }
+        draw_scrollbar(fb, scroll_top, BODY_BOTTOM, start, end, total, cap);
     }
-
-    draw_scrollbar(fb, scroll_top, BODY_BOTTOM, start, end, total, cap);
 }
 
 // ----- Image screen -------------------------------------------------------
@@ -1629,85 +1654,22 @@ fn main() {
     // user sees "ready, reboot to apply" in the status strip.
     ota::spawn_background_poller();
 
-    present!();
-
-    // --- OTA check ---
-    state.ota_line = "OTA: checking...".into();
-    state.ota_color = ACCENT;
-    present!();
-
-    match ota::fetch_manifest() {
-        Ok(manifest) => {
-            if ota::is_update_available(&manifest) {
-                log::info!("OTA: update {} -> {}", ota::CURRENT_VERSION, manifest.version);
-                state.ota_line = format!("OTA: {} -> {}", ota::CURRENT_VERSION, manifest.version);
-                state.ota_color = WARN;
-                state.ota_progress = Some(0.0);
-                present!();
-
-                let url = manifest.url.clone();
-                let target_version = manifest.version.clone();
-                let mut last_drawn_pct: i32 = -1;
-                let result = ota::apply_update(&url, |written, total| {
-                    let p = total
-                        .map(|t| if t == 0 { 0.0 } else { written as f32 / t as f32 })
-                        .unwrap_or(0.0);
-                    let pct = (p * 100.0) as i32;
-                    if pct == last_drawn_pct {
-                        return;
-                    }
-                    last_drawn_pct = pct;
-                    state.ota_progress = Some(p);
-                    state.ota_line = match total {
-                        Some(t) => format!("OTA: {}/{} KB ({}%)", written / 1024, t / 1024, pct),
-                        None => format!("OTA: {} KB", written / 1024),
-                    };
-                    render(&mut fb, &state);
-                    let _ = display.fill_contiguous(&area, fb.data.0.iter().copied());
-                });
-
-                match result {
-                    Ok(()) => {
-                        state.ota_line = format!("OTA: applied {} -> reboot", target_version);
-                        state.ota_color = OK;
-                        state.ota_progress = Some(1.0);
-                        present!();
-                        std::thread::sleep(Duration::from_millis(800));
-                        ota::restart();
-                    }
-                    Err(e) => {
-                        log::error!("OTA: apply failed: {e}");
-                        state.ota_line = format!("OTA fail: {e}");
-                        state.ota_color = ERR;
-                        state.ota_progress = None;
-                        present!();
-                    }
-                }
-            } else {
-                state.ota_line = format!("OTA: up to date (v{})", ota::CURRENT_VERSION);
-                state.ota_color = OK;
-                state.ota_progress = None;
-                present!();
-            }
-        }
-        Err(e) => {
-            log::warn!("OTA: manifest fetch failed: {e}");
-            state.ota_line = "OTA: check failed".into();
-            state.ota_color = ERR;
-            present!();
-        }
-    }
-
-    // --- initial GET for the status screen ---
-    refresh_endpoint(&mut state);
-    // Image component is in Idle state until the user first switches to the
-    // Image tab; the click handler kicks the blocking load there.
+    // Image component is in Idle state until the user first switches to
+    // the Image tab; that click spawns a thread to fetch + decode so the
+    // UI keeps animating the loading spinner while it runs.
     state.image = Some(image::RemoteImage::new(IMAGE_URL));
-    present!();
 
-    // Seed the bottom strip with the boot-time OTA outcome; the background
-    // poller below will override it as state changes.
+    // Kick off the Status-screen endpoint fetch in a worker thread so it
+    // doesn't block boot. Result lands in `STATUS_RESULT` and gets
+    // pulled into `state` by the event loop on the next tick that finds
+    // it populated.
+    refresh_endpoint_async();
+
+    // Seed the bottom strip from the bg-poller's initial state. The
+    // poller fires its first check within a few seconds and the event
+    // loop picks up subsequent transitions.
     apply_bg_ota_to_strip(&mut state);
+    present!();
 
     // --- event loop: poll encoder + button, react ---
     //
@@ -1835,21 +1797,17 @@ fn main() {
                         state.current_screen =
                             next_screen(state.current_screen, &state.visible_screens);
                         dirty = true;
-                        // Lazy-load image on first arrival at the Image tab.
+                        // Lazy-load image on first arrival at the Image
+                        // tab. `img.load()` is non-blocking — it spawns
+                        // a worker, transitions to Loading
+                        // synchronously, and the event loop's animation
+                        // tick keeps redrawing the spinner until the
+                        // worker stores Ready/Failed. The call itself
+                        // is idempotent: a second invocation while
+                        // already Loading or Ready is a no-op.
                         if state.current_screen == Screen::Image {
-                            let needs_load = state
-                                .image
-                                .as_ref()
-                                .map_or(false, |i| !i.is_ready());
-                            if needs_load {
-                                render(&mut fb, &state);
-                                let _ = display.fill_contiguous(
-                                    &area,
-                                    fb.data.0.iter().copied(),
-                                );
-                                if let Some(img) = state.image.as_mut() {
-                                    img.load();
-                                }
+                            if let Some(img) = state.image.as_ref() {
+                                img.load();
                             }
                         }
                     }
@@ -1896,17 +1854,36 @@ fn main() {
         // Animation frames on screens that have moving content.
         let image_anim = matches!(state.current_screen, Screen::Image)
             && state.image.as_ref().map_or(false, |i| i.is_ready());
+        // Loading spinner needs the same animation tick as Ready to keep
+        // its 8-dot rotation alive while the worker fetches + decodes.
+        let image_loading = matches!(state.current_screen, Screen::Image)
+            && state.image.as_ref().map_or(false, |i| i.is_loading());
         let game_anim = state.current_screen == Screen::Game
             && state.game.phase == game::Phase::Playing;
         let home_anim = matches!(state.current_screen, Screen::Home);
         let fortune_anim = matches!(state.current_screen, Screen::Fortune);
-        if (image_anim || game_anim || home_anim || fortune_anim)
+        // Status screen with an empty body shows an animated "fetching..."
+        // placeholder; once the async fetch lands, body is non-empty and
+        // the screen is static again.
+        let status_loading = matches!(state.current_screen, Screen::Status)
+            && state.body_lines.is_empty();
+        if (image_anim
+            || image_loading
+            || game_anim
+            || home_anim
+            || fortune_anim
+            || status_loading)
             && state.tick % ANIMATION_TICK_MOD == 0
         {
             // Decrement the fortune's casting timer on each animation tick.
             if state.current_screen == Screen::Fortune && state.fortune.is_casting() {
                 state.fortune.tick_anim();
             }
+            dirty = true;
+        }
+
+        // Pick up async status-fetch results.
+        if poll_status_into_state(&mut state) {
             dirty = true;
         }
 
@@ -1974,19 +1951,76 @@ fn apply_bg_ota_to_strip(state: &mut UiState) {
     }
 }
 
-fn refresh_endpoint(state: &mut UiState) {
-    match fetch_endpoint(URL) {
-        Ok((status, body)) => {
-            log::info!("status={status} body_len={}", body.len());
-            state.status = Some(status);
-            state.body_lines = pretty_json(&body);
-            state.screen_scroll[Screen::Status as usize] = 0;
-            state.error = None;
-        }
-        Err(e) => {
-            state.error = Some(format!("GET err: {e}"));
-            state.body_lines = vec![format!("{e}")];
-            state.screen_scroll[Screen::Status as usize] = 0;
-        }
+// ---------------------------------------------------------------------------
+// Async Status-screen endpoint fetch
+// ---------------------------------------------------------------------------
+//
+// We don't block boot on the /healthz GET anymore. `refresh_endpoint_async`
+// spawns a worker thread that does the HTTP fetch + pretty-print, then
+// drops the result in STATUS_RESULT. The event loop calls
+// `poll_status_into_state` each iteration; it's a single Mutex::take and
+// returns false quickly when no result is pending.
+//
+// STATUS_LOADING gates spawning — a second call while a fetch is in
+// flight is a no-op. Future "refresh now" buttons would go here.
+
+struct StatusResult {
+    status: Option<u16>,
+    body_lines: Vec<String>,
+    error: Option<String>,
+}
+
+static STATUS_RESULT: Mutex<Option<StatusResult>> = Mutex::new(None);
+static STATUS_LOADING: AtomicBool = AtomicBool::new(false);
+
+fn refresh_endpoint_async() {
+    if STATUS_LOADING.swap(true, Ordering::SeqCst) {
+        // Another fetch is already in flight; let it land.
+        return;
     }
+    let spawn = std::thread::Builder::new()
+        .name("status-fetch".into())
+        .stack_size(16 * 1024)
+        .spawn(|| {
+            log::info!("status: GET {URL}");
+            let result = match fetch_endpoint(URL) {
+                Ok((status, body)) => {
+                    log::info!("status={status} body_len={}", body.len());
+                    StatusResult {
+                        status: Some(status),
+                        body_lines: pretty_json(&body),
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    log::warn!("status: GET err: {e}");
+                    StatusResult {
+                        status: None,
+                        body_lines: vec![format!("{e}")],
+                        error: Some(format!("GET err: {e}")),
+                    }
+                }
+            };
+            *STATUS_RESULT.lock().unwrap() = Some(result);
+            STATUS_LOADING.store(false, Ordering::SeqCst);
+        });
+    if let Err(e) = spawn {
+        log::warn!("status: failed to spawn fetcher: {e}");
+        STATUS_LOADING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Drain the latest fetch result into `state`. Returns true if anything
+/// was applied — caller flags the frame dirty so the next render shows
+/// the new body.
+fn poll_status_into_state(state: &mut UiState) -> bool {
+    let result = STATUS_RESULT.lock().unwrap().take();
+    let Some(r) = result else {
+        return false;
+    };
+    state.status = r.status;
+    state.body_lines = r.body_lines;
+    state.error = r.error;
+    state.screen_scroll[Screen::Status as usize] = 0;
+    true
 }

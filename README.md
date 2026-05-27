@@ -41,10 +41,17 @@ and show/hide screens. Hit **Apply & Reboot** to commit — the config is
 persisted to NVS and the device picks it up on the next boot. See
 [Web management UI](#web-management-ui) below.
 
-**OTA:** every boot, the device polls a manifest in the bucket; if the
-version differs, it streams the new firmware into the inactive OTA slot,
-flips `ota_data`, and reboots. Bootloader rollback is enabled, so a brick
-self-heals on the next reset.
+**OTA:** the device runs a background OTA poller every 30 s (first
+check ~3 s after boot). When a newer version is found, it streams the
+firmware into the inactive slot, marks it bootable, and shows
+`OTA: vX.Y.Z ready — reboot to apply` in the bottom strip. Power-cycle
+to flip slots. Bootloader rollback is enabled, so a brick self-heals on
+the next reset.
+
+As of **v1.16.0** boot is fully non-blocking: WiFi connect → render the
+Home screen and start the event loop within ~3 s of boot. The /healthz
+fetch, the image fetch, and OTA all happen on their own worker threads —
+the UI keeps animating throughout.
 
 ---
 

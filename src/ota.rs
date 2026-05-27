@@ -25,7 +25,7 @@ use serde::Deserialize;
 /// Bump in lockstep with `CONFIG_APP_PROJECT_VER` in sdkconfig.defaults.
 /// They don't *have* to match — the comparison below is purely string equality
 /// against the manifest — but keeping them in sync avoids confusion.
-pub const CURRENT_VERSION: &str = "1.15.0";
+pub const CURRENT_VERSION: &str = "1.16.0";
 
 /// Base of the public Azure Blob container. Must end with a trailing slash.
 /// Account: `binsbucket` (resource group `claudisplay`).
@@ -180,13 +180,6 @@ pub fn apply_update<F: FnMut(usize, Option<usize>)>(url: &str, mut progress: F) 
     }
 }
 
-pub fn restart() -> ! {
-    log::info!("OTA: restarting into new slot");
-    unsafe { esp_idf_svc::sys::esp_restart() };
-    #[allow(unreachable_code)]
-    loop {}
-}
-
 // ---------------------------------------------------------------------------
 // Background OTA polling
 // ---------------------------------------------------------------------------
@@ -256,9 +249,11 @@ pub fn spawn_background_poller() {
         .stack_size(16 * 1024)
         .name("ota-poll".into())
         .spawn(|| {
-            // Give the rest of boot a moment to settle (and the screen to
-            // render initial state) before hitting the network again.
-            std::thread::sleep(Duration::from_secs(15));
+            // Give the rest of boot a moment to settle (display init +
+            // initial render) before hitting the network. Shortened in
+            // v1.16.0 from 15 s to 3 s now that boot doesn't run a
+            // synchronous OTA check first.
+            std::thread::sleep(Duration::from_secs(3));
 
             loop {
                 set_bg_state(BgState::Checking);

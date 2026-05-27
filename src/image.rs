@@ -11,6 +11,7 @@
 //! All state stays inside the value, so a single `RemoteImage` per URL can
 //! be embedded in any screen and re-rendered as often as the UI wants.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use embedded_graphics::{
@@ -73,20 +74,32 @@ enum State {
 
 pub struct RemoteImage {
     url: String,
-    state: State,
+    /// Shared state — written from the loader thread, read from the UI
+    /// thread. Locks are short (state transitions are single assignments;
+    /// fetch + decode happens outside the lock).
+    state: Arc<Mutex<State>>,
 }
 
 impl RemoteImage {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), state: State::Idle }
+        Self {
+            url: url.into(),
+            state: Arc::new(Mutex::new(State::Idle)),
+        }
     }
 
     pub fn url(&self) -> &str { &self.url }
-    pub fn is_ready(&self) -> bool { matches!(self.state, State::Ready(_)) }
-    pub fn is_loading(&self) -> bool { matches!(self.state, State::Loading) }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(&*self.state.lock().unwrap(), State::Ready(_))
+    }
+
+    pub fn is_loading(&self) -> bool {
+        matches!(&*self.state.lock().unwrap(), State::Loading)
+    }
 
     pub fn status_label(&self) -> String {
-        match &self.state {
+        match &*self.state.lock().unwrap() {
             State::Idle => "queued".into(),
             State::Loading => "loading...".into(),
             State::Ready(img) => format!("{}x{}", img.width, img.height),
@@ -94,33 +107,61 @@ impl RemoteImage {
         }
     }
 
-    /// Blocking fetch + decode. Designed to be called on screen entry. While
-    /// running, `state` is `Loading` so any concurrent `draw_in` paints the
-    /// spinner — but in practice the event loop is single-threaded so a
-    /// caller must arrange to draw the spinner once before calling this.
-    pub fn load(&mut self) {
-        log::info!("image: GET {}", self.url);
-        self.state = State::Loading;
-
-        let bytes = match fetch_bytes(&self.url) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!("image: fetch failed: {e}");
-                self.state = State::Failed(e);
+    /// Non-blocking: marks the state as Loading and spawns a worker
+    /// thread that fetches + decodes. The UI thread keeps redrawing the
+    /// loading spinner each animation tick; when the worker completes
+    /// the state transitions to Ready or Failed and the next render
+    /// picks it up automatically. A second call while a load is in
+    /// flight (or after one succeeded) is a no-op.
+    pub fn load(&self) {
+        // Skip if already in flight or already done. We refuse to retry
+        // a Failed state from here — the user has to drop and re-create
+        // the RemoteImage to retry. Keeps the threading model simple.
+        {
+            let mut s = self.state.lock().unwrap();
+            if matches!(*s, State::Loading | State::Ready(_)) {
                 return;
             }
-        };
-        log::info!("image: fetched {} bytes", bytes.len());
-
-        match decode_jpeg(&bytes) {
-            Ok(img) => {
-                log::info!("image: decoded {}x{}", img.width, img.height);
-                self.state = State::Ready(img);
-            }
-            Err(e) => {
-                log::warn!("image: decode failed: {e}");
-                self.state = State::Failed(e);
-            }
+            *s = State::Loading;
+        }
+        let state = Arc::clone(&self.state);
+        let url = self.url.clone();
+        // 16 KiB stack — enough for the TLS handshake + JPEG decoder
+        // call frame, with room to spare. The decoder itself heap-
+        // allocates its working buffers.
+        let spawn = std::thread::Builder::new()
+            .name("image-load".into())
+            .stack_size(16 * 1024)
+            .spawn(move || {
+                log::info!("image: GET {url}");
+                let new_state = match fetch_bytes(&url) {
+                    Ok(bytes) => {
+                        log::info!("image: fetched {} bytes", bytes.len());
+                        match decode_jpeg(&bytes) {
+                            Ok(img) => {
+                                log::info!(
+                                    "image: decoded {}x{}",
+                                    img.width, img.height
+                                );
+                                State::Ready(img)
+                            }
+                            Err(e) => {
+                                log::warn!("image: decode failed: {e}");
+                                State::Failed(e)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("image: fetch failed: {e}");
+                        State::Failed(e)
+                    }
+                };
+                *state.lock().unwrap() = new_state;
+            });
+        if let Err(e) = spawn {
+            log::warn!("image: failed to spawn loader: {e}");
+            *self.state.lock().unwrap() =
+                State::Failed(LoadError::Http(format!("spawn: {e}")));
         }
     }
 
@@ -133,7 +174,8 @@ impl RemoteImage {
         area: Rectangle,
         tick: u32,
     ) {
-        match &self.state {
+        let state = self.state.lock().unwrap();
+        match &*state {
             State::Ready(img) => draw_ready(fb, img, area, tick),
             State::Loading | State::Idle => draw_loading(fb, area, tick),
             State::Failed(e) => draw_error(fb, area, &e.to_string()),
