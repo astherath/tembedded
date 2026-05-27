@@ -82,6 +82,34 @@ pub const REGISTRY: &[PluginInfo] = &[
         screen: Screen::Manage,
         default_visible: true,
     },
+    PluginInfo {
+        id: "birthdays",
+        name: "Birthdays",
+        description: "Scrollable list of upcoming birthdays — date, days until, who's having it, and the age they'll turn. Uses the shared calendar-row widget. Off by default.",
+        screen: Screen::Birthdays,
+        default_visible: false,
+    },
+    PluginInfo {
+        id: "fasting",
+        name: "Fasting",
+        description: "16/8 intermittent fasting — top pane shows the planned eating/fasting window vs. the live wall clock, bottom pane is a manual fasting timer with a circular progress ring. Single-click on the screen toggles the timer between idle, running, paused, and done.",
+        screen: Screen::Fasting,
+        default_visible: false,
+    },
+    PluginInfo {
+        id: "quotes",
+        name: "Quotes",
+        description: "100 motivational quotes that auto-rotate every 60 seconds. No repeats per 100-quote cycle (Fisher-Yates shuffle), with a tiny circular countdown showing time until the next rotation. Off by default.",
+        screen: Screen::Quotes,
+        default_visible: false,
+    },
+    PluginInfo {
+        id: "worldcup",
+        name: "World Cup",
+        description: "Next 10 FIFA World Cup 2026 matches — date, time (ET), teams, venue. Pulls a JSON schedule from the OTA bucket asynchronously, with 10 hardcoded fallback matches baked in so it works offline. Uses the shared calendar-row widget.",
+        screen: Screen::Worldcup,
+        default_visible: false,
+    },
 ];
 
 pub fn lookup(id: &str) -> Option<&'static PluginInfo> {

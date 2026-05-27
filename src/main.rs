@@ -36,14 +36,19 @@ use u8g2_fonts::{
     FontRenderer,
 };
 
+mod birthdays;
+mod cal;
+mod fasting;
 mod fortune;
 mod game;
 mod home;
 mod image;
 mod ota;
 mod plugins;
+mod quotes;
 mod webconfig;
 mod wifi;
+mod worldcup;
 // wifi_creds.rs is still present as a one-time migration source: if NVS is
 // empty on first boot of this firmware, we try to connect with the baked-in
 // creds and then persist them. After that the file is unused.
@@ -128,10 +133,19 @@ pub enum Screen {
     /// On-device walkthrough for the web manager: how to reach it, the
     /// URL, and a scannable QR. New in v1.15.0.
     Manage = 6,
+    /// Scrollable list of upcoming birthdays. v1.17.0.
+    Birthdays = 7,
+    /// 16/8 intermittent fasting — schedule + manual timer. v1.17.0.
+    Fasting = 8,
+    /// 100 motivational quotes auto-rotating every 60 s. v1.17.0.
+    Quotes = 9,
+    /// Next 10 World Cup 2026 matches from a public JSON schedule
+    /// with a baked-in fallback. v1.17.0.
+    Worldcup = 10,
 }
 /// Sized for the Screen enum (highest discriminant + 1). Used to size
 /// `screen_scroll`; entries for currently-hidden screens are harmless.
-const NUM_SCREENS: usize = 7;
+const NUM_SCREENS: usize = 11;
 
 /// Manage screen scroll step — each encoder detent moves the body this
 /// many pixels. Tuned so a typical full scroll takes about half a wheel
@@ -188,6 +202,10 @@ struct UiState {
     game: game::Game,
     /// Fortune-teller oracle state.
     fortune: fortune::Fortune,
+    /// Intermittent-fasting timer state. v1.17.0.
+    fasting: fasting::Fasting,
+    /// Motivational-quote rotation state. v1.17.0.
+    quotes: quotes::Quotes,
 }
 
 impl Default for UiState {
@@ -214,6 +232,8 @@ impl Default for UiState {
             image: None,
             game: game::Game::new(),
             fortune: fortune::Fortune::new(),
+            fasting: fasting::Fasting::new(),
+            quotes: quotes::Quotes::new(),
         }
     }
 }
@@ -238,7 +258,7 @@ const STRIP_TOP: i32 = H as i32 - STRIP_H; // 154
 const BODY_TOP: i32 = 0;
 const BODY_BOTTOM: i32 = STRIP_TOP - 1; // 153
 const BODY_LINE_H: i32 = 11;
-const BODY_LEFT: i32 = 10;
+pub const BODY_LEFT: i32 = 10;
 
 /// Slim title bar each screen draws inside its own body, leaving the rest
 /// of the body for scrollable content.
@@ -280,6 +300,20 @@ fn render(fb: &mut FrameBuf<Rgb565, VecFb>, s: &UiState) {
         Screen::Status => render_status_body(fb, s),
         Screen::System => render_system_body(fb, s),
         Screen::Manage => render_manage_body(fb, s),
+        Screen::Birthdays => birthdays::render(
+            fb,
+            s.screen_scroll[Screen::Birthdays as usize],
+            BODY_TOP,
+            BODY_BOTTOM,
+        ),
+        Screen::Fasting => fasting::render(fb, &s.fasting, BODY_TOP, BODY_BOTTOM, s.tick),
+        Screen::Quotes => quotes::render(fb, &s.quotes, BODY_TOP, BODY_BOTTOM, s.tick),
+        Screen::Worldcup => worldcup::render(
+            fb,
+            s.screen_scroll[Screen::Worldcup as usize],
+            BODY_TOP,
+            BODY_BOTTOM,
+        ),
     }
 
     draw_bottom_strip(fb, s);
@@ -1665,6 +1699,11 @@ fn main() {
     // it populated.
     refresh_endpoint_async();
 
+    // Kick off the World Cup schedule fetch in another worker thread.
+    // Same pattern: result lands in a static Mutex inside worldcup.rs
+    // and the screen renders the fallback list until then.
+    worldcup::kick_fetch();
+
     // Seed the bottom strip from the bg-poller's initial state. The
     // poller fires its first check within a few seconds and the event
     // loop picks up subsequent transitions.
@@ -1757,6 +1796,10 @@ fn main() {
                     Screen::Fortune => 1,
                     Screen::System => system_body_visible_lines(),
                     Screen::Manage => 1,
+                    Screen::Birthdays => 4,
+                    Screen::Fasting => 1,
+                    Screen::Quotes => 1,
+                    Screen::Worldcup => 4,
                 };
                 let total = match state.current_screen {
                     Screen::Status => state.body_lines.len(),
@@ -1766,6 +1809,10 @@ fn main() {
                     Screen::Fortune => 0,
                     Screen::System => system_rows(&state).len(),
                     Screen::Manage => manage_max_scroll_steps() + 1,
+                    Screen::Birthdays => birthdays::row_count(),
+                    Screen::Fasting => 0,
+                    Screen::Quotes => 0,
+                    Screen::Worldcup => worldcup::row_count(),
                 };
                 let max_scroll = total.saturating_sub(cap);
                 let idx = state.current_screen as usize;
@@ -1838,6 +1885,10 @@ fn main() {
                             dirty = true;
                         }
                     }
+                    Screen::Fasting => {
+                        state.fasting.click();
+                        dirty = true;
+                    }
                     _ => {}
                 }
             }
@@ -1867,12 +1918,18 @@ fn main() {
         // the screen is static again.
         let status_loading = matches!(state.current_screen, Screen::Status)
             && state.body_lines.is_empty();
+        // Fasting: the live clock + timer countdown both need ~20 fps.
+        let fasting_anim = matches!(state.current_screen, Screen::Fasting);
+        // Quotes: the tiny countdown ring needs continuous redraw.
+        let quotes_anim = matches!(state.current_screen, Screen::Quotes);
         if (image_anim
             || image_loading
             || game_anim
             || home_anim
             || fortune_anim
-            || status_loading)
+            || status_loading
+            || fasting_anim
+            || quotes_anim)
             && state.tick % ANIMATION_TICK_MOD == 0
         {
             // Decrement the fortune's casting timer on each animation tick.
@@ -1885,6 +1942,15 @@ fn main() {
         // Pick up async status-fetch results.
         if poll_status_into_state(&mut state) {
             dirty = true;
+        }
+
+        // Advance the motivational-quotes rotation timer. tick() returns
+        // true on the frame the displayed quote changed.
+        if state.current_screen == Screen::Quotes {
+            let now_ms = state.tick.wrapping_mul(5);
+            if state.quotes.tick(now_ms) {
+                dirty = true;
+            }
         }
 
         // Reflect background-OTA state changes in the bottom strip.
